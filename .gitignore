@@ -1,0 +1,7 @@
+# Copy this into .gitignore
+.streamlit/secrets.toml
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
