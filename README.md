@@ -4,10 +4,10 @@
 
 Paste a company URL and job description, upload a candidate resume, and get 5–10 tailored interview questions with detailed scoring rubrics, red flags, and follow-ups. Export as a professional PDF to hand directly to your hiring panel.
 
-![Demo Screenshot](assets/demo-screenshot.png)
+![Demo Screenshot](assets/demo-screenshot_interviewer.png)
 <!-- Replace with actual screenshot -->
 
-**[Try the Live Demo →](your-streamlit-url)**
+**[Try the Live Demo →](https://arkanex-ai-interviewer.streamlit.app/)**
 
 ---
 
