@@ -599,7 +599,7 @@ def generate_pdf(questions, company_info, job_info, question_type):
     # Contact info on cover
     story.append(Paragraph("<b>Contact:</b>", styles['Normal']))
     story.append(Paragraph("Built by Karan Rajpal | Haas MBA '25 | Handshake AI", styles['Normal']))
-    story.append(Paragraph("📧 karan.rajpal@berkeley.edu | 💼 linkedin.com/in/karanrajpal", styles['Normal']))
+    story.append(Paragraph("📧 karan.rajpal@berkeley.edu | 💼 linkedin.com/in/krajpal", styles['Normal']))
     
     story.append(PageBreak())
     
@@ -647,7 +647,7 @@ def generate_pdf(questions, company_info, job_info, question_type):
     story.append(Spacer(1, 0.2*inch))
     story.append(Paragraph("<b>Contact:</b>", styles['Normal']))
     story.append(Paragraph("Built by Karan Rajpal | Haas MBA '25 | Handshake AI", styles['Normal']))
-    story.append(Paragraph("📧 karan.rajpal@berkeley.edu | 💼 linkedin.com/in/karanrajpal", styles['Normal']))
+    story.append(Paragraph("📧 karan.rajpal@berkeley.edu | 💼 linkedin.com/in/krajpal", styles['Normal']))
     
     doc.build(story)
     buffer.seek(0)
@@ -1225,8 +1225,8 @@ st.markdown("""
     <p style='margin-bottom: 0.5rem;'>Built by Karan Rajpal | Haas MBA '25 | Handshake AI</p>
     <p style='font-size: 0.9rem;'>
         📧 karan.rajpal@berkeley.edu | 
-        💼 <a href='https://linkedin.com/in/karanrajpal' target='_blank' style='color: #667eea;'>LinkedIn</a> |
-        🌐 <a href='https://karanrajpal.com' target='_blank' style='color: #667eea;'>Portfolio</a>
+        💼 <a href='https://www.linkedin.com/in/krajpal/' target='_blank' style='color: #667eea;'>LinkedIn</a> |
+        🌐 <a href='https://github.com/AAP67' target='_blank' style='color: #667eea;'>Portfolio</a>
     </p>
     <p style='font-size: 0.85rem; margin-top: 1rem; color: #999;'>© 2026 | Built with Streamlit & Claude AI</p>
 </div>
