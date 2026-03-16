@@ -784,7 +784,7 @@ with st.sidebar:
     st.markdown("**Questions? Feedback?**")
     st.markdown("Built by Karan Rajpal")
     st.markdown("Haas MBA '25 | Handshake AI")
-    st.markdown("📧 [Contact](mailto:karan.rajpal@berkeley.edu) | 💼 [LinkedIn](https://linkedin.com/in/karanrajpal)")
+    st.markdown("📧 [Contact](mailto:karan.rajpal@berkeley.edu) | 💼 [LinkedIn](https://www.linkedin.com/in/krajpal/)")
     
     st.markdown("---")
     
