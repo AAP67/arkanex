@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import anthropic
 import json
 from io import BytesIO
@@ -1111,6 +1112,22 @@ if generate_button:
             st.session_state.company_info = company_info
             st.session_state.job_info = job_info
             st.session_state.candidate_info = candidate_info
+            
+            # Signal to Francium parent
+            import json as _json
+            _signal_data = _json.dumps({
+                "type": "francium_signal",
+                "toolId": "arkanex",
+                "event": "questions_generated",
+                "data": {
+                    "company": company_name or company_url or "not specified",
+                    "job_title": job_title or "not specified",
+                    "question_type": question_type,
+                    "num_questions": num_questions,
+                    "has_candidate_profile": bool(candidate_profile),
+                }
+            })
+            components.html(f"<script>window.top.postMessage({_signal_data}, '*');</script>", height=0)
             
             # Enhanced success message
             st.markdown("""
