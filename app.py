@@ -14,6 +14,7 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.enums import TA_CENTER
 from datetime import datetime
 import base64
+import time
 
 # Page configuration
 st.set_page_config(
@@ -437,66 +438,60 @@ def generate_interview_questions(api_key, company_info, job_info, candidate_info
         client = anthropic.Anthropic(api_key=api_key)
         
         if question_type == "Conversational Questions":
-            question_style = """conversational behavioral and situational questions that assess:
-- Past experiences and problem-solving approach
-- Leadership and stakeholder management
-- Communication and influence
-- Strategic thinking and prioritization
-- Cultural fit and values alignment
-
-Format: Open-ended questions that encourage storytelling and specific examples."""
+            question_style = "conversational behavioral and situational"
+            style_guidance = """These should be open-ended questions that encourage storytelling and specific examples.
+Assess: past experiences, problem-solving approach, leadership, stakeholder management, communication, influence, strategic thinking, prioritization, and cultural fit."""
         else:
-            question_style = """scenario-based case study questions that test:
-- Real-time problem-solving and analytical thinking
-- Operational execution and planning
-- Cross-functional coordination
-- Resource allocation and trade-off decisions
-- Live skills demonstration
+            question_style = "scenario-based case study"
+            style_guidance = """These should be realistic business scenarios with specific constraints, numbers, timelines, and named stakeholders.
+Assess: real-time problem-solving, analytical thinking, operational execution, cross-functional coordination, resource allocation, and trade-off decisions."""
 
-Format: Realistic business scenarios with specific constraints and challenges."""
-        
-        prompt = f"""You are an expert at creating interview questions for Business Operations and Chief of Staff roles.
+        system_prompt = f"""You are a senior interview designer specializing in Chief of Staff, Business Operations, and Strategy roles at high-growth companies.
 
-Generate {num_questions} {question_style}
+Your job is to create {num_questions} {question_style} interview questions that are deeply grounded in the specific company, role, and candidate provided below.
 
-**Company Context:**
-{company_info}
+GROUNDING RULES — follow these strictly:
+1. Every question MUST reference at least one specific detail from the company context (e.g., industry, stage, product, challenge, competitor, team size).
+2. Every scenario or setup MUST be plausible for THIS company — not generic. Use the company's actual domain, scale, and constraints.
+3. At least half the questions should probe gaps or mismatches between the candidate's background and the role requirements. Identify what's untested.
+4. Rubric items must be specific enough that two interviewers would agree on scoring. No vague criteria like "shows leadership."
+5. Follow-ups should escalate difficulty — push deeper, not sideways.
 
-**Job Details:**
-{job_info}
+STYLE: {style_guidance}
 
-**Candidate Background:**
-{candidate_info}
-
-For each question, provide:
-1. A compelling title (5-7 words)
-2. A detailed scenario or context (if case study) or question setup (if conversational)
-3. The main question
-4. Evaluation rubric with:
-   - "excellent" indicators (5-6 specific points showing strong answers)
-   - "redFlags" (4-5 warning signs of weak answers)
-5. Three follow-up questions to dig deeper
-
-**IMPORTANT:** Return ONLY a valid JSON array with no additional text, markdown formatting, or code blocks. Format:
+OUTPUT FORMAT: Return ONLY a valid JSON array. No markdown, no code fences, no commentary. Structure:
 [
   {{
-    "title": "Question title",
-    "scenario": "Detailed scenario or question setup",
-    "question": "The main question to ask",
+    "title": "5-7 word title",
+    "scenario": "Detailed scenario grounded in company context (case study) or question setup with specific framing (conversational)",
+    "question": "The core question to ask the candidate",
     "rubric": {{
-      "excellent": ["Point 1", "Point 2", "Point 3", "Point 4", "Point 5"],
-      "redFlags": ["Flag 1", "Flag 2", "Flag 3", "Flag 4"]
+      "excellent": ["Specific observable indicator 1", "Specific observable indicator 2", "...(5-6 total)"],
+      "redFlags": ["Specific warning sign 1", "Specific warning sign 2", "...(4-5 total)"]
     }},
-    "followUps": ["Follow-up 1", "Follow-up 2", "Follow-up 3"]
+    "followUps": ["Escalating follow-up 1", "Escalating follow-up 2", "Escalating follow-up 3"]
   }}
-]
+]"""
 
-Generate realistic, company-specific questions that test both strategic thinking and operational execution. Make scenarios concrete with specific numbers, constraints, and stakeholders."""
+        user_prompt = f"""<company>
+{company_info}
+</company>
+
+<role>
+{job_info}
+</role>
+
+<candidate>
+{candidate_info}
+</candidate>
+
+Generate {num_questions} interview questions now."""
 
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}]
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}]
         )
         
         response_text = message.content[0].text.strip()
@@ -904,18 +899,28 @@ with col1:
                     st.session_state.scraped_jd = scraped_jd
                     st.success("✅ Job description extracted!")
         
-        # Show scraped JD if available
-        default_jd_context = st.session_state.get('scraped_jd', '')
-        if not default_jd_context and loaded_session:
-            default_jd_context = loaded_session['inputs'].get('company_context', '')
+        # Show scraped JD as editable job description
+        default_jd_text = st.session_state.get('scraped_jd', '')
+        if not default_jd_text and loaded_session:
+            default_jd_text = loaded_session['inputs'].get('job_description', '')
+        
+        job_description = st.text_area(
+            "Extracted Job Description",
+            height=200,
+            placeholder="Click 'Auto-Extract' above, or paste the job description here...",
+            value=default_jd_text
+        )
+        
+        default_context = ''
+        if loaded_session:
+            default_context = loaded_session['inputs'].get('company_context', '')
         
         company_context = st.text_area(
-            "Company Context",
-            height=150,
-            placeholder="Add any additional context...",
-            value=default_jd_context
+            "Company Context (Optional)",
+            height=100,
+            placeholder="Add any additional company context: stage, industry, challenges...",
+            value=default_context
         )
-        job_description = None
 
 with col2:
     st.subheader("👤 Candidate Information")
@@ -1051,7 +1056,10 @@ if generate_button:
         job_info = f"Job Title: {job_title or 'See description'}\n"
         if job_description:
             job_info += f"Description:\n{job_description}"
+        elif st.session_state.get('scraped_jd'):
+            job_info += f"Description (extracted from {jd_link}):\n{st.session_state.scraped_jd}"
         elif jd_link:
+            st.warning("⚠️ No job description text available. Click 'Auto-Extract Job Description' first, or paste the JD manually for better results.")
             job_info += f"Job Posting URL: {jd_link}"
         
         candidate_info = f"Candidate: {candidate_name or 'Anonymous'}\n"
