@@ -348,6 +348,16 @@ if 'job_info' not in st.session_state:
     st.session_state.job_info = None
 if 'candidate_info' not in st.session_state:
     st.session_state.candidate_info = None
+if 'gap_analysis' not in st.session_state:
+    st.session_state.gap_analysis = None
+if 'mock_mode' not in st.session_state:
+    st.session_state.mock_mode = False
+if 'current_q_index' not in st.session_state:
+    st.session_state.current_q_index = 0
+if 'answers' not in st.session_state:
+    st.session_state.answers = {}
+if 'evaluations' not in st.session_state:
+    st.session_state.evaluations = {}
 
 # Helper function to extract text from PDF
 def extract_text_from_pdf(pdf_file):
@@ -432,8 +442,182 @@ def scrape_job_description(url):
     except Exception as e:
         return f"Error scraping job posting: {str(e)}"
 
+# Function to generate gap analysis
+def generate_gap_analysis(api_key, company_info, job_info, candidate_info):
+    """Analyze candidate resume against JD and identify gaps, strengths, and untested areas."""
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        system_prompt = """You are an expert interview coach analyzing a candidate's fit for a specific role.
+
+Compare the candidate's background against the job requirements and produce a structured analysis.
+
+OUTPUT FORMAT: Return ONLY a valid JSON object. No markdown, no code fences, no commentary. Structure:
+{
+    "overall_fit": "strong" or "moderate" or "weak",
+    "fit_score": 1-10 integer,
+    "strengths": [
+        {"area": "Competency name", "evidence": "Specific evidence from resume that maps to JD requirement"}
+    ],
+    "gaps": [
+        {"area": "Competency name", "detail": "What the JD requires that the candidate lacks or hasn't demonstrated", "risk_level": "high" or "medium" or "low", "preparation_tip": "Specific advice on how to prepare for questions in this area"}
+    ],
+    "untested": [
+        {"area": "Competency name", "detail": "JD requirement where candidate may have experience but resume doesn't clearly show it"}
+    ],
+    "summary": "2-3 sentence overall assessment — what to focus on"
+}
+
+RULES:
+- Be specific. Reference actual text from the resume and JD.
+- Strengths should cite exact experience that maps to exact requirements.
+- Gaps should identify what's missing, not what's weak. If the JD asks for "5+ years managing teams" and the resume shows no management, that's a gap.
+- Untested areas are things the candidate might know but hasn't proven — give them benefit of the doubt.
+- Preparation tips should be actionable: "Prepare 2 STAR stories about cross-functional leadership" not "Be ready to discuss leadership."
+- 3-5 strengths, 3-5 gaps, 2-3 untested areas."""
+
+        user_prompt = f"""<role>
+{job_info}
+</role>
+
+<company>
+{company_info}
+</company>
+
+<candidate>
+{candidate_info}
+</candidate>
+
+Analyze this candidate's fit for the role."""
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}]
+        )
+        
+        response_text = message.content[0].text.strip()
+        
+        # Clean markdown
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1])
+        response_text = response_text.replace("```json", "").replace("```", "").strip()
+        
+        # Extract JSON
+        import re
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            analysis = json.loads(json_match.group())
+            return analysis, None
+        
+        return json.loads(response_text), None
+        
+    except json.JSONDecodeError:
+        return None, "Error parsing gap analysis. Continuing to question generation."
+    except Exception as e:
+        return None, f"Gap analysis error: {str(e)}. Continuing to question generation."
+
+
+# Function to evaluate a candidate's answer
+def evaluate_answer(api_key, question, answer, question_type):
+    """Evaluate a candidate's answer against the rubric with STAR framework coaching."""
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        star_instructions = ""
+        if question_type == "Conversational Questions":
+            star_instructions = """
+STAR FRAMEWORK CHECK:
+Also evaluate whether the answer follows the STAR framework:
+- Situation: Did they set the scene with specific context?
+- Task: Did they explain their specific role/responsibility?
+- Action: Did they describe concrete steps THEY took (not the team)?
+- Result: Did they share a measurable outcome or impact?
+
+For each STAR element, mark as "present", "partial", or "missing".
+If any element is missing, include specific coaching on what to add."""
+
+        system_prompt = f"""You are an expert interview coach evaluating a candidate's practice answer.
+
+You will receive:
+1. The interview question (with scenario, rubric, and follow-ups)
+2. The candidate's answer
+
+Evaluate the answer honestly but constructively. This is practice — the goal is improvement.
+
+{star_instructions}
+
+OUTPUT FORMAT: Return ONLY a valid JSON object. No markdown, no code fences. Structure:
+{{
+    "score": "excellent" or "good" or "needs_work",
+    "score_numeric": 1-5 integer (5=excellent, 3=good, 1=needs_work),
+    "feedback": "2-3 sentences of specific, actionable feedback. Reference exact things they said.",
+    "strengths": ["Specific thing they did well 1", "Specific thing they did well 2"],
+    "improvements": ["Specific thing to improve 1", "Specific thing to improve 2", "Specific thing to improve 3"],
+    "star_assessment": {{
+        "situation": "present" or "partial" or "missing",
+        "task": "present" or "partial" or "missing",
+        "action": "present" or "partial" or "missing",
+        "result": "present" or "partial" or "missing",
+        "coaching": "Specific STAR coaching advice" or null
+    }},
+    "rubric_match": {{
+        "excellent_indicators_hit": ["Which excellent indicators from the rubric were demonstrated"],
+        "red_flags_triggered": ["Which red flags from the rubric were triggered"]
+    }}
+}}"""
+
+        user_prompt = f"""<question>
+Title: {question.get('title', '')}
+Scenario: {question.get('scenario', '')}
+Question: {question.get('question', '')}
+
+Rubric - Excellent indicators:
+{chr(10).join('- ' + e for e in question.get('rubric', {}).get('excellent', []))}
+
+Rubric - Red flags:
+{chr(10).join('- ' + r for r in question.get('rubric', {}).get('redFlags', []))}
+</question>
+
+<candidate_answer>
+{answer}
+</candidate_answer>
+
+Evaluate this answer."""
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}]
+        )
+        
+        response_text = message.content[0].text.strip()
+        
+        # Clean markdown
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1])
+        response_text = response_text.replace("```json", "").replace("```", "").strip()
+        
+        import re
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            evaluation = json.loads(json_match.group())
+            return evaluation, None
+        
+        return json.loads(response_text), None
+        
+    except json.JSONDecodeError:
+        return None, "Error parsing evaluation. Please try again."
+    except Exception as e:
+        return None, f"Evaluation error: {str(e)}"
+
+
 # Function to generate interview questions using Claude
-def generate_interview_questions(api_key, company_info, job_info, candidate_info, num_questions, question_type):
+def generate_interview_questions(api_key, company_info, job_info, candidate_info, num_questions, question_type, gap_analysis=None):
     """Generate interview questions using Claude API"""
     try:
         client = anthropic.Anthropic(api_key=api_key)
@@ -474,6 +658,24 @@ OUTPUT FORMAT: Return ONLY a valid JSON array. No markdown, no code fences, no c
   }}
 ]"""
 
+        gap_context = ""
+        if gap_analysis:
+            gaps_text = "\n".join(f"- {g['area']}: {g['detail']}" for g in gap_analysis.get("gaps", []))
+            untested_text = "\n".join(f"- {u['area']}: {u['detail']}" for u in gap_analysis.get("untested", []))
+            strengths_text = "\n".join(f"- {s['area']}: {s['evidence']}" for s in gap_analysis.get("strengths", []))
+            gap_context = f"""
+<gap_analysis>
+CANDIDATE GAPS (prioritize questions targeting these):
+{gaps_text}
+
+UNTESTED AREAS (probe these):
+{untested_text}
+
+CONFIRMED STRENGTHS (can test depth but don't over-index):
+{strengths_text}
+</gap_analysis>
+"""
+
         user_prompt = f"""<company>
 {company_info}
 </company>
@@ -485,8 +687,8 @@ OUTPUT FORMAT: Return ONLY a valid JSON array. No markdown, no code fences, no c
 <candidate>
 {candidate_info}
 </candidate>
-
-Generate {num_questions} interview questions now."""
+{gap_context}
+Generate {num_questions} interview questions now. At least half should target the identified gaps and untested areas."""
 
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -705,6 +907,86 @@ def format_questions_markdown(questions, company_info, job_info):
         md += "\n---\n\n"
     
     return md
+
+
+def _display_evaluation(evaluation, question_type):
+    """Display the evaluation results with STAR assessment."""
+    score = evaluation.get('score', 'unknown')
+    score_num = evaluation.get('score_numeric', 3)
+    score_colors = {'excellent': '#28a745', 'good': '#ffc107', 'needs_work': '#dc3545'}
+    score_labels = {'excellent': 'Excellent', 'good': 'Good', 'needs_work': 'Needs Work'}
+    sc_color = score_colors.get(score, '#999')
+    
+    # Score badge
+    st.markdown(f"""
+    <div style='background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+                padding: 1.5rem; border-radius: 10px; border-left: 4px solid {sc_color}; margin: 1rem 0;'>
+        <div style='display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem;'>
+            <span style='font-size: 2rem; font-weight: 700; color: {sc_color};'>{score_num}/5</span>
+            <span style='font-size: 1.1rem; color: #333; text-transform: uppercase; font-weight: 600;'>
+                {score_labels.get(score, score)}
+            </span>
+        </div>
+        <p style='color: #555; margin: 0; font-size: 0.95rem;'>{evaluation.get('feedback', '')}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Strengths and improvements
+    eval_col1, eval_col2 = st.columns(2)
+    with eval_col1:
+        st.markdown("**✅ What You Did Well:**")
+        for s in evaluation.get('strengths', []):
+            st.markdown(f"- {s}")
+    with eval_col2:
+        st.markdown("**📈 What to Improve:**")
+        for imp in evaluation.get('improvements', []):
+            st.markdown(f"- {imp}")
+    
+    # STAR assessment (for behavioral questions)
+    star = evaluation.get('star_assessment', {})
+    if star and question_type == "Conversational Questions":
+        st.markdown("---")
+        st.markdown("**📐 STAR Framework Assessment:**")
+        
+        star_icons = {'present': '✅', 'partial': '🟡', 'missing': '❌'}
+        star_cols = st.columns(4)
+        
+        for i, element in enumerate(['situation', 'task', 'action', 'result']):
+            with star_cols[i]:
+                status = star.get(element, 'missing')
+                icon = star_icons.get(status, '❓')
+                st.markdown(f"""
+                <div style='text-align: center; padding: 0.5rem; background: #f8f9fa; border-radius: 6px;'>
+                    <div style='font-size: 1.5rem;'>{icon}</div>
+                    <div style='font-size: 0.8rem; font-weight: 600; color: #333; text-transform: uppercase;'>{element}</div>
+                    <div style='font-size: 0.7rem; color: #666;'>{status}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        if star.get('coaching'):
+            st.markdown(f"""
+            <div style='background: #e8edff; padding: 0.8rem; border-radius: 6px; margin-top: 0.5rem; border-left: 3px solid #667eea;'>
+                <strong style='color: #667eea;'>💡 STAR Coaching:</strong>
+                <span style='color: #333;'> {star.get('coaching')}</span>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # Rubric match
+    rubric_match = evaluation.get('rubric_match', {})
+    if rubric_match:
+        hits = rubric_match.get('excellent_indicators_hit', [])
+        flags = rubric_match.get('red_flags_triggered', [])
+        if hits or flags:
+            with st.expander("📊 Rubric Match Details"):
+                if hits:
+                    st.markdown("**Excellent indicators demonstrated:**")
+                    for h in hits:
+                        st.markdown(f"- ✅ {h}")
+                if flags:
+                    st.markdown("**Red flags triggered:**")
+                    for fl in flags:
+                        st.markdown(f"- 🚩 {fl}")
+
 
 # Header
 st.markdown("""
@@ -1024,13 +1306,16 @@ Education: Stanford MBA, MIT Computer Science BS"""
     num_questions = 5
     
     # Trigger generation immediately
-    with st.spinner("🤖 Generating demo interview questions... This may take 30-60 seconds..."):
+    with st.spinner("🤖 Analyzing candidate fit and generating questions... This may take 30-60 seconds..."):
         company_info = f"Company: {company_name}\nContext: {company_context}"
         job_info = f"Job Title: {job_title}\nDescription:\n{job_description}"
         candidate_info = f"Candidate: {candidate_name}\nProfile:\n{candidate_profile}"
         
+        # Gap analysis first
+        gap_analysis, gap_error = generate_gap_analysis(api_key, company_info, job_info, candidate_info)
+        
         questions, error = generate_interview_questions(
-            api_key, company_info, job_info, candidate_info, num_questions, question_type
+            api_key, company_info, job_info, candidate_info, num_questions, question_type, gap_analysis
         )
     
     if error:
@@ -1040,6 +1325,7 @@ Education: Stanford MBA, MIT Computer Science BS"""
         st.session_state.company_info = company_info
         st.session_state.job_info = job_info
         st.session_state.candidate_info = candidate_info
+        st.session_state.gap_analysis = gap_analysis
         st.success(f"✅ Demo generated! {len(questions)} questions created for Anthropic Chief of Staff role.")
         st.rerun()
 
@@ -1071,38 +1357,30 @@ if generate_button:
         progress_placeholder = st.empty()
         
         with st.spinner(""):
-            # Show progressive messages
-            import time
-            
+            # Step 1: Gap analysis
             progress_placeholder.markdown("""
             <div style='text-align: center; padding: 1rem;'>
-                <h4 style='color: #667eea;'>🤖 Generating Your Interview Questions...</h4>
-                <p style='color: #666;'>⚡ Analyzing job requirements...</p>
+                <h4 style='color: #667eea;'>🤖 Preparing Your Practice Session...</h4>
+                <p style='color: #666;'>🔍 Analyzing your resume against the job description...</p>
             </div>
             """, unsafe_allow_html=True)
-            time.sleep(1)
             
+            gap_analysis, gap_error = generate_gap_analysis(api_key, company_info, job_info, candidate_info)
+            
+            # Step 2: Generate questions
             progress_placeholder.markdown("""
             <div style='text-align: center; padding: 1rem;'>
-                <h4 style='color: #667eea;'>🤖 Generating Your Interview Questions...</h4>
-                <p style='color: #666;'>🎯 Customizing for candidate background...</p>
-            </div>
-            """, unsafe_allow_html=True)
-            time.sleep(1)
-            
-            progress_placeholder.markdown("""
-            <div style='text-align: center; padding: 1rem;'>
-                <h4 style='color: #667eea;'>🤖 Generating Your Interview Questions...</h4>
-                <p style='color: #666;'>📝 Creating evaluation rubrics...</p>
+                <h4 style='color: #667eea;'>🤖 Preparing Your Practice Session...</h4>
+                <p style='color: #666;'>🎯 Generating questions targeting your gaps...</p>
                 <p style='color: #999; font-size: 0.9rem;'>(30-60 seconds remaining)</p>
             </div>
             """, unsafe_allow_html=True)
             
             questions, error = generate_interview_questions(
-                api_key, company_info, job_info, candidate_info, num_questions, question_type
+                api_key, company_info, job_info, candidate_info, num_questions, question_type, gap_analysis
             )
         
-        progress_placeholder.empty()  # Clear the progress messages
+        progress_placeholder.empty()
         
         if error:
             st.error(f"❌ {error}")
@@ -1112,6 +1390,7 @@ if generate_button:
             st.session_state.company_info = company_info
             st.session_state.job_info = job_info
             st.session_state.candidate_info = candidate_info
+            st.session_state.gap_analysis = gap_analysis
             
             # Signal to Francium parent
             import json as _json
@@ -1153,94 +1432,327 @@ if st.session_state.generated_questions:
     questions = st.session_state.generated_questions
     
     st.markdown("---")
-    st.header("📋 Generated Interview Questions")
     
-    # Primary action - PDF download (full width)
-    pdf_buffer = generate_pdf(questions, st.session_state.company_info, st.session_state.job_info, question_type)
-    st.download_button(
-        label="🚀 Download Professional PDF",
-        data=pdf_buffer,
-        file_name=f"interview_questions_{datetime.now().strftime('%Y%m%d')}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-        type="primary"
-    )
-    
-    st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
-    
-    # Secondary actions
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        # Copy to clipboard
-        markdown_text = format_questions_markdown(questions, st.session_state.company_info, st.session_state.job_info)
-        st.download_button(
-            label="📋 Copy as Markdown",
-            data=markdown_text,
-            file_name=f"interview_questions_{datetime.now().strftime('%Y%m%d')}.md",
-            mime="text/markdown",
-            use_container_width=True
-        )
-    
-    with col2:
-        # Save session as JSON
-        session_json = create_session_json(
-            company_name, company_url, company_context, job_title, job_description, jd_link,
-            candidate_name, candidate_profile, num_questions, question_type, questions
-        )
-        st.download_button(
-            label="💾 Save Session",
-            data=session_json,
-            file_name=f"arkanex_session_{datetime.now().strftime('%Y%m%d')}.json",
-            mime="application/json",
-            use_container_width=True
-        )
-    
-    with col3:
-        # Generate new set button
-        if st.button("🔄 Generate New Set", use_container_width=True):
-            st.session_state.generated_questions = None
-            st.rerun()
-    
-    st.markdown("---")
-    
-    # Display each question
-    for idx, q in enumerate(questions, 1):
+    # Display gap analysis if available
+    gap_analysis = st.session_state.get('gap_analysis')
+    if gap_analysis:
+        st.header("🔍 Candidate Fit Analysis")
+        
+        # Overall fit badge
+        fit = gap_analysis.get('overall_fit', 'moderate')
+        score = gap_analysis.get('fit_score', 5)
+        fit_colors = {'strong': '#28a745', 'moderate': '#ffc107', 'weak': '#dc3545'}
+        fit_color = fit_colors.get(fit, '#ffc107')
+        
         st.markdown(f"""
-        <div class="question-card">
-            <h3>Question {idx}: {q.get('title', 'Untitled')}</h3>
+        <div style='background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); 
+                    padding: 1.5rem; border-radius: 10px; border-left: 4px solid {fit_color}; margin-bottom: 1.5rem;'>
+            <div style='display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem;'>
+                <span style='font-size: 2rem; font-weight: 700; color: {fit_color};'>{score}/10</span>
+                <span style='font-size: 1.1rem; color: #333; text-transform: uppercase; letter-spacing: 1px; font-weight: 600;'>{fit} fit</span>
+            </div>
+            <p style='color: #555; margin: 0; font-size: 0.95rem;'>{gap_analysis.get('summary', '')}</p>
         </div>
         """, unsafe_allow_html=True)
         
-        if q.get('scenario'):
-            st.markdown("**Scenario/Context:**")
-            st.write(q['scenario'])
+        col_s, col_g, col_u = st.columns(3)
         
-        st.markdown("**Question:**")
-        st.markdown(f"*{q.get('question', 'No question provided')}*")
+        with col_s:
+            st.markdown("#### ✅ Strengths")
+            for s in gap_analysis.get('strengths', []):
+                st.markdown(f"""
+                <div style='background: #d4edda; padding: 0.7rem; border-radius: 6px; margin-bottom: 0.5rem; border-left: 3px solid #28a745;'>
+                    <strong style='color: #155724;'>{s.get('area', '')}</strong><br>
+                    <span style='color: #155724; font-size: 0.85rem;'>{s.get('evidence', '')}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        with col_g:
+            st.markdown("#### ⚠️ Gaps to Prepare")
+            for g in gap_analysis.get('gaps', []):
+                risk_colors = {'high': '#dc3545', 'medium': '#ffc107', 'low': '#17a2b8'}
+                r_color = risk_colors.get(g.get('risk_level', 'medium'), '#ffc107')
+                st.markdown(f"""
+                <div style='background: #fff3cd; padding: 0.7rem; border-radius: 6px; margin-bottom: 0.5rem; border-left: 3px solid {r_color};'>
+                    <strong style='color: #856404;'>{g.get('area', '')}</strong>
+                    <span style='background: {r_color}; color: white; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; margin-left: 6px;'>{g.get('risk_level', 'medium').upper()}</span><br>
+                    <span style='color: #856404; font-size: 0.85rem;'>{g.get('detail', '')}</span><br>
+                    <span style='color: #667eea; font-size: 0.8rem;'>💡 {g.get('preparation_tip', '')}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        with col_u:
+            st.markdown("#### 🔎 Untested Areas")
+            for u in gap_analysis.get('untested', []):
+                st.markdown(f"""
+                <div style='background: #d1ecf1; padding: 0.7rem; border-radius: 6px; margin-bottom: 0.5rem; border-left: 3px solid #17a2b8;'>
+                    <strong style='color: #0c5460;'>{u.get('area', '')}</strong><br>
+                    <span style='color: #0c5460; font-size: 0.85rem;'>{u.get('detail', '')}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+    
+    st.header("📋 Interview Practice Questions")
+    
+    # Mode toggle
+    mode_col1, mode_col2, mode_col3 = st.columns([1, 1, 1])
+    with mode_col1:
+        if st.button("🎯 Practice Mode" if not st.session_state.mock_mode else "✅ In Practice Mode", 
+                     use_container_width=True, type="primary" if st.session_state.mock_mode else "secondary"):
+            st.session_state.mock_mode = True
+            st.session_state.current_q_index = 0
+            st.rerun()
+    with mode_col2:
+        if st.button("📋 View All Questions" if st.session_state.mock_mode else "✅ Viewing All",
+                     use_container_width=True, type="secondary" if st.session_state.mock_mode else "primary"):
+            st.session_state.mock_mode = False
+            st.rerun()
+    with mode_col3:
+        pdf_buffer = generate_pdf(questions, st.session_state.company_info, st.session_state.job_info, question_type)
+        st.download_button(
+            label="📥 Download PDF",
+            data=pdf_buffer,
+            file_name=f"interview_questions_{datetime.now().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    
+    st.markdown("---")
+    
+    # ═══════════════════════════════════════
+    # PRACTICE MODE
+    # ═══════════════════════════════════════
+    if st.session_state.mock_mode:
+        total_q = len(questions)
+        current_idx = st.session_state.current_q_index
+        
+        # Progress bar
+        answered = len(st.session_state.evaluations)
+        st.progress(answered / total_q, text=f"Question {min(current_idx + 1, total_q)} of {total_q} · {answered} answered")
+        
+        if current_idx >= total_q:
+            # All questions done — show summary (Build 4 will enhance this)
+            st.markdown("""
+            <div style='background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); 
+                        padding: 2rem; border-radius: 10px; text-align: center; margin: 1rem 0;'>
+                <h2 style='color: #155724; margin-top: 0;'>🎉 Practice Complete!</h2>
+                <p style='color: #155724; font-size: 1.1rem;'>You've answered all {total_q} questions.</p>
+            </div>
+            """.format(total_q=total_q), unsafe_allow_html=True)
+            
+            # Quick score summary
+            scores = []
+            for idx in range(total_q):
+                ev = st.session_state.evaluations.get(idx)
+                if ev:
+                    scores.append(ev.get('score_numeric', 3))
+            
+            if scores:
+                avg = sum(scores) / len(scores)
+                score_label = "Excellent" if avg >= 4.5 else "Good" if avg >= 3.5 else "Needs Work"
+                score_color = "#28a745" if avg >= 4.5 else "#ffc107" if avg >= 3.5 else "#dc3545"
+                
+                st.markdown(f"""
+                <div style='text-align: center; margin: 1rem 0;'>
+                    <span style='font-size: 3rem; font-weight: 700; color: {score_color};'>{avg:.1f}/5</span>
+                    <br><span style='font-size: 1.2rem; color: #333;'>{score_label}</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Per-question scores
+                for idx in range(total_q):
+                    ev = st.session_state.evaluations.get(idx)
+                    if ev:
+                        q = questions[idx]
+                        sc = ev.get('score', 'unknown')
+                        sc_colors = {'excellent': '#28a745', 'good': '#ffc107', 'needs_work': '#dc3545'}
+                        st.markdown(f"""
+                        <div style='display: flex; justify-content: space-between; align-items: center; 
+                                    padding: 0.5rem 1rem; background: #f8f9fa; border-radius: 6px; margin: 0.3rem 0;
+                                    border-left: 3px solid {sc_colors.get(sc, '#999')};'>
+                            <span style='color: #333;'>Q{idx+1}: {q.get('title', '')}</span>
+                            <span style='color: {sc_colors.get(sc, '#999')}; font-weight: 600; text-transform: uppercase;'>{sc.replace('_', ' ')}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+            
+            col_retry, col_new = st.columns(2)
+            with col_retry:
+                if st.button("🔄 Practice Again", use_container_width=True):
+                    st.session_state.current_q_index = 0
+                    st.session_state.answers = {}
+                    st.session_state.evaluations = {}
+                    st.rerun()
+            with col_new:
+                if st.button("🆕 New Question Set", use_container_width=True):
+                    st.session_state.generated_questions = None
+                    st.session_state.mock_mode = False
+                    st.session_state.answers = {}
+                    st.session_state.evaluations = {}
+                    st.session_state.gap_analysis = None
+                    st.rerun()
+        
+        else:
+            # Show current question
+            q = questions[current_idx]
+            
+            st.markdown(f"""
+            <div style='background: linear-gradient(135deg, #f0f4ff 0%, #e8edff 100%); 
+                        padding: 1.5rem; border-radius: 10px; border-left: 4px solid #667eea; margin-bottom: 1rem;'>
+                <h3 style='color: #667eea; margin-top: 0;'>Question {current_idx + 1}: {q.get('title', '')}</h3>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if q.get('scenario'):
+                st.markdown("**Scenario/Context:**")
+                st.write(q['scenario'])
+            
+            st.markdown("**Question:**")
+            st.markdown(f"### *{q.get('question', '')}*")
+            
+            if q.get('followUps'):
+                with st.expander("💡 Follow-up Questions (will be asked after your main answer)"):
+                    for i, followup in enumerate(q['followUps'], 1):
+                        st.markdown(f"{i}. {followup}")
+            
+            st.markdown("---")
+            
+            # Check if already answered
+            existing_eval = st.session_state.evaluations.get(current_idx)
+            existing_answer = st.session_state.answers.get(current_idx, "")
+            
+            if existing_eval:
+                # Show previous answer and evaluation
+                st.markdown("**Your Answer:**")
+                st.info(existing_answer)
+                
+                _display_evaluation(existing_eval, question_type)
+                
+                # Navigation
+                nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 1])
+                with nav_col1:
+                    if current_idx > 0:
+                        if st.button("⬅️ Previous", use_container_width=True):
+                            st.session_state.current_q_index -= 1
+                            st.rerun()
+                with nav_col2:
+                    if st.button("🔄 Retry This Question", use_container_width=True):
+                        del st.session_state.evaluations[current_idx]
+                        if current_idx in st.session_state.answers:
+                            del st.session_state.answers[current_idx]
+                        st.rerun()
+                with nav_col3:
+                    if st.button("➡️ Next Question" if current_idx < total_q - 1 else "📊 See Results", 
+                                use_container_width=True, type="primary"):
+                        st.session_state.current_q_index += 1
+                        st.rerun()
+            
+            else:
+                # Answer input
+                answer = st.text_area(
+                    "Your Answer",
+                    height=200,
+                    placeholder="Type your answer here. Be specific — use real examples, numbers, and outcomes. Structure your response with the STAR framework (Situation, Task, Action, Result) for behavioral questions.",
+                    key=f"answer_{current_idx}",
+                    value=existing_answer,
+                )
+                
+                submit_col1, submit_col2 = st.columns([3, 1])
+                with submit_col1:
+                    submit_answer = st.button("📝 Submit & Get Feedback", use_container_width=True, 
+                                             type="primary", disabled=not answer.strip())
+                with submit_col2:
+                    if st.button("⏭️ Skip", use_container_width=True):
+                        st.session_state.current_q_index += 1
+                        st.rerun()
+                
+                if submit_answer and answer.strip():
+                    st.session_state.answers[current_idx] = answer.strip()
+                    
+                    with st.spinner("🤖 Evaluating your answer..."):
+                        evaluation, eval_error = evaluate_answer(api_key, q, answer.strip(), question_type)
+                    
+                    if eval_error:
+                        st.error(f"❌ {eval_error}")
+                    elif evaluation:
+                        st.session_state.evaluations[current_idx] = evaluation
+                        st.rerun()
+    
+    # ═══════════════════════════════════════
+    # VIEW ALL MODE (original behavior)
+    # ═══════════════════════════════════════
+    else:
+        # Secondary actions
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            markdown_text = format_questions_markdown(questions, st.session_state.company_info, st.session_state.job_info)
+            st.download_button(
+                label="📋 Copy as Markdown",
+                data=markdown_text,
+                file_name=f"interview_questions_{datetime.now().strftime('%Y%m%d')}.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
+        
+        with col2:
+            session_json = create_session_json(
+                company_name, company_url, company_context, job_title, job_description, jd_link,
+                candidate_name, candidate_profile, num_questions, question_type, questions
+            )
+            st.download_button(
+                label="💾 Save Session",
+                data=session_json,
+                file_name=f"arkanex_session_{datetime.now().strftime('%Y%m%d')}.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        
+        with col3:
+            if st.button("🔄 Generate New Set", use_container_width=True):
+                st.session_state.generated_questions = None
+                st.session_state.gap_analysis = None
+                st.rerun()
         
         st.markdown("---")
         
-        col_good, col_bad = st.columns(2)
-        
-        with col_good:
-            st.markdown('<span class="excellent-badge">✅ EXCELLENT RESPONSES</span>', unsafe_allow_html=True)
-            if q.get('rubric', {}).get('excellent'):
-                for point in q['rubric']['excellent']:
-                    st.markdown(f"- {point}")
-        
-        with col_bad:
-            st.markdown('<span class="redflag-badge">🚩 RED FLAGS</span>', unsafe_allow_html=True)
-            if q.get('rubric', {}).get('redFlags'):
-                for flag in q['rubric']['redFlags']:
-                    st.markdown(f"- {flag}")
-        
-        if q.get('followUps'):
-            with st.expander("💡 Follow-up Questions"):
-                for i, followup in enumerate(q['followUps'], 1):
-                    st.markdown(f"{i}. {followup}")
-        
-        st.markdown("---")
+        # Display each question
+        for idx, q in enumerate(questions, 1):
+            st.markdown(f"""
+            <div class="question-card">
+                <h3>Question {idx}: {q.get('title', 'Untitled')}</h3>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if q.get('scenario'):
+                st.markdown("**Scenario/Context:**")
+                st.write(q['scenario'])
+            
+            st.markdown("**Question:**")
+            st.markdown(f"*{q.get('question', 'No question provided')}*")
+            
+            st.markdown("---")
+            
+            col_good, col_bad = st.columns(2)
+            
+            with col_good:
+                st.markdown('<span class="excellent-badge">✅ EXCELLENT RESPONSES</span>', unsafe_allow_html=True)
+                if q.get('rubric', {}).get('excellent'):
+                    for point in q['rubric']['excellent']:
+                        st.markdown(f"- {point}")
+            
+            with col_bad:
+                st.markdown('<span class="redflag-badge">🚩 RED FLAGS</span>', unsafe_allow_html=True)
+                if q.get('rubric', {}).get('redFlags'):
+                    for flag in q['rubric']['redFlags']:
+                        st.markdown(f"- {flag}")
+            
+            if q.get('followUps'):
+                with st.expander("💡 Follow-up Questions"):
+                    for i, followup in enumerate(q['followUps'], 1):
+                        st.markdown(f"{i}. {followup}")
+            
+            st.markdown("---")
 
 # Footer
 st.markdown("---")
