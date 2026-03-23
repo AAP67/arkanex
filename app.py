@@ -358,6 +358,10 @@ if 'answers' not in st.session_state:
     st.session_state.answers = {}
 if 'evaluations' not in st.session_state:
     st.session_state.evaluations = {}
+if 'attempt_history' not in st.session_state:
+    st.session_state.attempt_history = {}  # {q_index: [{answer, evaluation, timestamp}]}
+if 'model_answers' not in st.session_state:
+    st.session_state.model_answers = {}
 
 # Helper function to extract text from PDF
 def extract_text_from_pdf(pdf_file):
@@ -614,6 +618,59 @@ Evaluate this answer."""
         return None, "Error parsing evaluation. Please try again."
     except Exception as e:
         return None, f"Evaluation error: {str(e)}"
+
+
+# Function to generate a model answer
+def generate_model_answer(api_key, question, candidate_info, question_type):
+    """Generate an ideal model answer showing what an excellent response looks like."""
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        star_instruction = ""
+        if question_type == "Conversational Questions":
+            star_instruction = "Structure the answer using the STAR framework (Situation, Task, Action, Result). Make each element explicit and detailed."
+        
+        system_prompt = f"""You are an interview coach writing a MODEL ANSWER for a candidate to learn from.
+
+This is NOT a real answer — it's an example of what an excellent response would look like for this specific question.
+
+RULES:
+- Write in first person as if the candidate is speaking
+- Be specific with examples, numbers, timelines, and outcomes
+- Hit every "excellent" indicator from the rubric
+- Avoid every red flag
+- {star_instruction}
+- Keep it to 200-300 words — concise but thorough
+- Tailor it to the candidate's actual background where possible
+- Make it sound natural and conversational, not scripted
+
+Output the model answer text only, nothing else."""
+
+        user_prompt = f"""Question: {question.get('question', '')}
+Scenario: {question.get('scenario', '')}
+
+Excellent indicators to hit:
+{chr(10).join('- ' + e for e in question.get('rubric', {}).get('excellent', []))}
+
+Red flags to avoid:
+{chr(10).join('- ' + r for r in question.get('rubric', {}).get('redFlags', []))}
+
+Candidate background:
+{candidate_info}
+
+Write the model answer."""
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1000,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}]
+        )
+        
+        return message.content[0].text.strip(), None
+        
+    except Exception as e:
+        return None, f"Model answer error: {str(e)}"
 
 
 # Function to generate interview questions using Claude
@@ -1532,64 +1589,183 @@ if st.session_state.generated_questions:
         st.progress(answered / total_q, text=f"Question {min(current_idx + 1, total_q)} of {total_q} · {answered} answered")
         
         if current_idx >= total_q:
-            # All questions done — show summary (Build 4 will enhance this)
+            # ═══════════════════════════════════════
+            # PRACTICE SCORECARD (Build 4)
+            # ═══════════════════════════════════════
             st.markdown("""
-            <div style='background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); 
+            <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                         padding: 2rem; border-radius: 10px; text-align: center; margin: 1rem 0;'>
-                <h2 style='color: #155724; margin-top: 0;'>🎉 Practice Complete!</h2>
-                <p style='color: #155724; font-size: 1.1rem;'>You've answered all {total_q} questions.</p>
+                <h2 style='color: white; margin-top: 0;'>📊 Practice Scorecard</h2>
+                <p style='color: #e0e7ff; font-size: 1.1rem;'>You completed all {total_q} questions.</p>
             </div>
             """.format(total_q=total_q), unsafe_allow_html=True)
             
-            # Quick score summary
+            # Collect all scores
             scores = []
+            all_strengths = []
+            all_improvements = []
             for idx in range(total_q):
                 ev = st.session_state.evaluations.get(idx)
                 if ev:
                     scores.append(ev.get('score_numeric', 3))
+                    all_strengths.extend(ev.get('strengths', []))
+                    all_improvements.extend(ev.get('improvements', []))
             
             if scores:
                 avg = sum(scores) / len(scores)
+                excellent_count = sum(1 for s in scores if s >= 4.5)
+                good_count = sum(1 for s in scores if 3 <= s < 4.5)
+                needs_work_count = sum(1 for s in scores if s < 3)
+                
                 score_label = "Excellent" if avg >= 4.5 else "Good" if avg >= 3.5 else "Needs Work"
                 score_color = "#28a745" if avg >= 4.5 else "#ffc107" if avg >= 3.5 else "#dc3545"
                 
+                # Overall score
                 st.markdown(f"""
-                <div style='text-align: center; margin: 1rem 0;'>
-                    <span style='font-size: 3rem; font-weight: 700; color: {score_color};'>{avg:.1f}/5</span>
-                    <br><span style='font-size: 1.2rem; color: #333;'>{score_label}</span>
+                <div style='text-align: center; margin: 1.5rem 0;'>
+                    <span style='font-size: 4rem; font-weight: 700; color: {score_color};'>{avg:.1f}</span>
+                    <span style='font-size: 1.5rem; color: #999;'>/5</span>
+                    <br><span style='font-size: 1.3rem; color: #333; font-weight: 600;'>{score_label}</span>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Per-question scores
+                # Score distribution
+                dist_col1, dist_col2, dist_col3 = st.columns(3)
+                with dist_col1:
+                    st.markdown(f"""
+                    <div style='text-align: center; background: #d4edda; padding: 1rem; border-radius: 8px;'>
+                        <div style='font-size: 2rem; font-weight: 700; color: #28a745;'>{excellent_count}</div>
+                        <div style='font-size: 0.8rem; color: #155724;'>Excellent</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with dist_col2:
+                    st.markdown(f"""
+                    <div style='text-align: center; background: #fff3cd; padding: 1rem; border-radius: 8px;'>
+                        <div style='font-size: 2rem; font-weight: 700; color: #ffc107;'>{good_count}</div>
+                        <div style='font-size: 0.8rem; color: #856404;'>Good</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with dist_col3:
+                    st.markdown(f"""
+                    <div style='text-align: center; background: #f8d7da; padding: 1rem; border-radius: 8px;'>
+                        <div style='font-size: 2rem; font-weight: 700; color: #dc3545;'>{needs_work_count}</div>
+                        <div style='font-size: 0.8rem; color: #721c24;'>Needs Work</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("---")
+                
+                # Per-question breakdown
+                st.markdown("### 📝 Question-by-Question Breakdown")
                 for idx in range(total_q):
                     ev = st.session_state.evaluations.get(idx)
                     if ev:
                         q = questions[idx]
                         sc = ev.get('score', 'unknown')
+                        sc_num = ev.get('score_numeric', 3)
                         sc_colors = {'excellent': '#28a745', 'good': '#ffc107', 'needs_work': '#dc3545'}
+                        
+                        # Attempt history
+                        attempts = st.session_state.attempt_history.get(idx, [])
+                        attempt_text = ""
+                        if len(attempts) > 1:
+                            attempt_scores = [a.get('score_numeric', 0) for a in attempts]
+                            first = attempt_scores[0]
+                            last = attempt_scores[-1]
+                            if last > first:
+                                attempt_text = f" · 📈 Improved ({first}→{last} over {len(attempts)} attempts)"
+                            elif last == first:
+                                attempt_text = f" · ({len(attempts)} attempts)"
+                        
+                        with st.expander(f"Q{idx+1}: {q.get('title', '')} — **{sc.replace('_', ' ').upper()}** ({sc_num}/5){attempt_text}"):
+                            st.markdown(f"**Feedback:** {ev.get('feedback', '')}")
+                            
+                            fc1, fc2 = st.columns(2)
+                            with fc1:
+                                st.markdown("**✅ Strengths:**")
+                                for s in ev.get('strengths', []):
+                                    st.markdown(f"- {s}")
+                            with fc2:
+                                st.markdown("**📈 Improvements:**")
+                                for imp in ev.get('improvements', []):
+                                    st.markdown(f"- {imp}")
+                            
+                            # Model answer for non-excellent answers (Build 5)
+                            if sc != 'excellent':
+                                model = st.session_state.model_answers.get(idx)
+                                if model:
+                                    st.markdown("---")
+                                    st.markdown(f"""
+                                    <div style='background: #e8edff; padding: 1rem; border-radius: 8px; border-left: 3px solid #667eea;'>
+                                        <strong style='color: #667eea;'>💡 Model Answer (for reference):</strong>
+                                        <p style='color: #333; margin-top: 0.5rem; line-height: 1.6;'>{model}</p>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                else:
+                                    if st.button(f"💡 Show Model Answer for Q{idx+1}", key=f"model_{idx}"):
+                                        with st.spinner("Generating model answer..."):
+                                            model_answer, model_err = generate_model_answer(
+                                                api_key, q, 
+                                                st.session_state.get('candidate_info', ''),
+                                                question_type
+                                            )
+                                        if model_answer:
+                                            st.session_state.model_answers[idx] = model_answer
+                                            st.rerun()
+                
+                st.markdown("---")
+                
+                # Top improvement areas
+                if all_improvements:
+                    st.markdown("### 🎯 Top 3 Things to Improve")
+                    # Deduplicate and take top 3
+                    seen = set()
+                    unique_improvements = []
+                    for imp in all_improvements:
+                        if imp not in seen:
+                            seen.add(imp)
+                            unique_improvements.append(imp)
+                    for i, imp in enumerate(unique_improvements[:3], 1):
                         st.markdown(f"""
-                        <div style='display: flex; justify-content: space-between; align-items: center; 
-                                    padding: 0.5rem 1rem; background: #f8f9fa; border-radius: 6px; margin: 0.3rem 0;
-                                    border-left: 3px solid {sc_colors.get(sc, '#999')};'>
-                            <span style='color: #333;'>Q{idx+1}: {q.get('title', '')}</span>
-                            <span style='color: {sc_colors.get(sc, '#999')}; font-weight: 600; text-transform: uppercase;'>{sc.replace('_', ' ')}</span>
+                        <div style='background: #fff3cd; padding: 0.8rem; border-radius: 6px; margin: 0.3rem 0; border-left: 3px solid #ffc107;'>
+                            <strong style='color: #856404;'>{i}.</strong> <span style='color: #856404;'>{imp}</span>
                         </div>
                         """, unsafe_allow_html=True)
             
-            col_retry, col_new = st.columns(2)
-            with col_retry:
+            # Action buttons
+            st.markdown("---")
+            action_col1, action_col2, action_col3 = st.columns(3)
+            with action_col1:
                 if st.button("🔄 Practice Again", use_container_width=True):
                     st.session_state.current_q_index = 0
                     st.session_state.answers = {}
                     st.session_state.evaluations = {}
+                    st.session_state.model_answers = {}
+                    # Keep attempt_history for tracking improvement
                     st.rerun()
-            with col_new:
+            with action_col2:
+                if st.button("📝 Retry Weak Questions", use_container_width=True, type="primary"):
+                    # Find first non-excellent question
+                    for idx in range(total_q):
+                        ev = st.session_state.evaluations.get(idx)
+                        if ev and ev.get('score') != 'excellent':
+                            st.session_state.current_q_index = idx
+                            del st.session_state.evaluations[idx]
+                            if idx in st.session_state.answers:
+                                del st.session_state.answers[idx]
+                            st.rerun()
+                            break
+                    else:
+                        st.success("All questions scored Excellent! 🎉")
+            with action_col3:
                 if st.button("🆕 New Question Set", use_container_width=True):
                     st.session_state.generated_questions = None
                     st.session_state.mock_mode = False
                     st.session_state.answers = {}
                     st.session_state.evaluations = {}
                     st.session_state.gap_analysis = None
+                    st.session_state.attempt_history = {}
+                    st.session_state.model_answers = {}
                     st.rerun()
         
         else:
@@ -1622,11 +1798,43 @@ if st.session_state.generated_questions:
             existing_answer = st.session_state.answers.get(current_idx, "")
             
             if existing_eval:
+                # Show attempt history if retried (Build 6)
+                attempts = st.session_state.attempt_history.get(current_idx, [])
+                if len(attempts) > 1:
+                    st.markdown(f"""
+                    <div style='background: #e8edff; padding: 0.5rem 1rem; border-radius: 6px; margin-bottom: 0.5rem; font-size: 0.85rem;'>
+                        📈 <strong>Attempt {len(attempts)}</strong> — 
+                        {' → '.join(f'{a.get("score", "?").replace("_", " ").title()} ({a.get("score_numeric", "?")}/5)' for a in attempts)}
+                    </div>
+                    """, unsafe_allow_html=True)
+                
                 # Show previous answer and evaluation
                 st.markdown("**Your Answer:**")
                 st.info(existing_answer)
                 
                 _display_evaluation(existing_eval, question_type)
+                
+                # Model answer for non-excellent (Build 5)
+                if existing_eval.get('score') != 'excellent':
+                    model = st.session_state.model_answers.get(current_idx)
+                    if model:
+                        st.markdown(f"""
+                        <div style='background: #e8edff; padding: 1rem; border-radius: 8px; border-left: 3px solid #667eea; margin: 1rem 0;'>
+                            <strong style='color: #667eea;'>💡 Model Answer:</strong>
+                            <p style='color: #333; margin-top: 0.5rem; line-height: 1.6;'>{model}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        if st.button("💡 Show Model Answer", key=f"model_inline_{current_idx}"):
+                            with st.spinner("Generating model answer..."):
+                                model_answer, model_err = generate_model_answer(
+                                    api_key, q,
+                                    st.session_state.get('candidate_info', ''),
+                                    question_type
+                                )
+                            if model_answer:
+                                st.session_state.model_answers[current_idx] = model_answer
+                                st.rerun()
                 
                 # Navigation
                 nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 1])
@@ -1637,6 +1845,17 @@ if st.session_state.generated_questions:
                             st.rerun()
                 with nav_col2:
                     if st.button("🔄 Retry This Question", use_container_width=True):
+                        # Save current attempt to history before clearing (Build 6)
+                        if current_idx not in st.session_state.attempt_history:
+                            st.session_state.attempt_history[current_idx] = []
+                        # Only add if not already the last entry
+                        history = st.session_state.attempt_history[current_idx]
+                        if not history or history[-1].get('answer') != existing_answer:
+                            history.append({
+                                'answer': existing_answer,
+                                'score': existing_eval.get('score'),
+                                'score_numeric': existing_eval.get('score_numeric'),
+                            })
                         del st.session_state.evaluations[current_idx]
                         if current_idx in st.session_state.answers:
                             del st.session_state.answers[current_idx]
@@ -1676,6 +1895,14 @@ if st.session_state.generated_questions:
                         st.error(f"❌ {eval_error}")
                     elif evaluation:
                         st.session_state.evaluations[current_idx] = evaluation
+                        # Track attempt (Build 6)
+                        if current_idx not in st.session_state.attempt_history:
+                            st.session_state.attempt_history[current_idx] = []
+                        st.session_state.attempt_history[current_idx].append({
+                            'answer': answer.strip(),
+                            'score': evaluation.get('score'),
+                            'score_numeric': evaluation.get('score_numeric'),
+                        })
                         st.rerun()
     
     # ═══════════════════════════════════════
