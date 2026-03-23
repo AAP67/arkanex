@@ -362,6 +362,10 @@ if 'attempt_history' not in st.session_state:
     st.session_state.attempt_history = {}  # {q_index: [{answer, evaluation, timestamp}]}
 if 'model_answers' not in st.session_state:
     st.session_state.model_answers = {}
+if 'timer_enabled' not in st.session_state:
+    st.session_state.timer_enabled = False
+if 'timer_minutes' not in st.session_state:
+    st.session_state.timer_minutes = 2
 
 # Helper function to extract text from PDF
 def extract_text_from_pdf(pdf_file):
@@ -553,6 +557,11 @@ Evaluate the answer honestly but constructively. This is practice — the goal i
 
 {star_instructions}
 
+COMPETENCY ASSESSMENT:
+Rate the candidate on each relevant competency demonstrated (or not) in this answer. Use 1-5 scale.
+Common competencies for strategic roles: stakeholder_management, analytical_thinking, leadership, communication, execution, strategic_thinking, problem_solving, prioritization.
+Only include competencies that are relevant to THIS specific question.
+
 OUTPUT FORMAT: Return ONLY a valid JSON object. No markdown, no code fences. Structure:
 {{
     "score": "excellent" or "good" or "needs_work",
@@ -560,6 +569,7 @@ OUTPUT FORMAT: Return ONLY a valid JSON object. No markdown, no code fences. Str
     "feedback": "2-3 sentences of specific, actionable feedback. Reference exact things they said.",
     "strengths": ["Specific thing they did well 1", "Specific thing they did well 2"],
     "improvements": ["Specific thing to improve 1", "Specific thing to improve 2", "Specific thing to improve 3"],
+    "competencies": {{"stakeholder_management": 4, "analytical_thinking": 3}},
     "star_assessment": {{
         "situation": "present" or "partial" or "missing",
         "task": "present" or "partial" or "missing",
@@ -1071,6 +1081,17 @@ with st.sidebar:
         options=["Conversational Questions", "Case Study Questions"],
         help="Conversational: Behavioral and situational questions\nCase Study: Scenario-based problem-solving questions"
     )
+    
+    st.markdown("---")
+    
+    # Practice Timer Settings
+    st.subheader("⏱️ Practice Timer")
+    timer_enabled = st.toggle("Enable answer timer", value=st.session_state.get('timer_enabled', False), 
+                              help="Adds a countdown timer when answering in Practice Mode")
+    st.session_state.timer_enabled = timer_enabled
+    if timer_enabled:
+        timer_minutes = st.slider("Minutes per question", min_value=1, max_value=5, value=2)
+        st.session_state.timer_minutes = timer_minutes
     
     st.markdown("---")
     
@@ -1655,6 +1676,67 @@ if st.session_state.generated_questions:
                 
                 st.markdown("---")
                 
+                # ═══ Competency Heatmap (Build 7) ═══
+                competency_scores = {}  # {competency: [scores]}
+                for idx in range(total_q):
+                    ev = st.session_state.evaluations.get(idx)
+                    if ev and ev.get('competencies'):
+                        for comp, score in ev['competencies'].items():
+                            if comp not in competency_scores:
+                                competency_scores[comp] = []
+                            competency_scores[comp].append(score)
+                
+                if competency_scores:
+                    st.markdown("### 🧭 Competency Heatmap")
+                    st.markdown("<p style='color: #666; font-size: 0.85rem;'>Averaged across all questions that tested each competency.</p>", unsafe_allow_html=True)
+                    
+                    # Sort by average score (weakest first)
+                    sorted_comps = sorted(
+                        competency_scores.items(), 
+                        key=lambda x: sum(x[1]) / len(x[1])
+                    )
+                    
+                    for comp, scores_list in sorted_comps:
+                        avg_score = sum(scores_list) / len(scores_list)
+                        bar_width = (avg_score / 5) * 100
+                        
+                        if avg_score >= 4:
+                            bar_color = "#28a745"
+                            label_color = "#155724"
+                        elif avg_score >= 3:
+                            bar_color = "#ffc107"
+                            label_color = "#856404"
+                        else:
+                            bar_color = "#dc3545"
+                            label_color = "#721c24"
+                        
+                        comp_display = comp.replace('_', ' ').title()
+                        
+                        st.markdown(f"""
+                        <div style='margin-bottom: 0.6rem;'>
+                            <div style='display: flex; justify-content: space-between; margin-bottom: 0.2rem;'>
+                                <span style='font-size: 0.85rem; color: #333; font-weight: 500;'>{comp_display}</span>
+                                <span style='font-size: 0.85rem; color: {label_color}; font-weight: 600;'>{avg_score:.1f}/5 ({len(scores_list)}q)</span>
+                            </div>
+                            <div style='height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden;'>
+                                <div style='height: 100%; width: {bar_width}%; background: {bar_color}; border-radius: 4px; transition: width 0.5s ease;'></div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    # Weakest competency callout
+                    weakest_comp, weakest_scores = sorted_comps[0]
+                    weakest_avg = sum(weakest_scores) / len(weakest_scores)
+                    if weakest_avg < 4:
+                        st.markdown(f"""
+                        <div style='background: #fff3cd; padding: 0.8rem; border-radius: 6px; margin-top: 0.5rem; border-left: 3px solid #ffc107;'>
+                            <strong style='color: #856404;'>🎯 Focus area:</strong>
+                            <span style='color: #856404;'> {weakest_comp.replace('_', ' ').title()} ({weakest_avg:.1f}/5) — practice more questions that test this competency.</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    st.markdown("---")
+                
                 # Per-question breakdown
                 st.markdown("### 📝 Question-by-Question Breakdown")
                 for idx in range(total_q):
@@ -1867,6 +1949,53 @@ if st.session_state.generated_questions:
                         st.rerun()
             
             else:
+                # Interview Timer (Build 8)
+                if st.session_state.timer_enabled:
+                    timer_seconds = st.session_state.timer_minutes * 60
+                    components.html(f"""
+                    <div id="timer-container" style="text-align: center; padding: 0.8rem; background: linear-gradient(135deg, #f0f4ff 0%, #e8edff 100%); border-radius: 8px; margin-bottom: 1rem; border: 1px solid #667eea;">
+                        <span style="font-size: 0.75rem; color: #667eea; text-transform: uppercase; letter-spacing: 1px;">⏱️ Time Remaining</span>
+                        <div id="timer-display" style="font-size: 2rem; font-weight: 700; color: #667eea; font-family: monospace;"></div>
+                        <div id="timer-bar" style="height: 4px; background: #e0e7ff; border-radius: 2px; margin-top: 0.5rem; overflow: hidden;">
+                            <div id="timer-fill" style="height: 100%; background: #667eea; border-radius: 2px; transition: width 1s linear;"></div>
+                        </div>
+                    </div>
+                    <script>
+                        var totalSeconds = {timer_seconds};
+                        var remaining = totalSeconds;
+                        var display = document.getElementById('timer-display');
+                        var fill = document.getElementById('timer-fill');
+                        var container = document.getElementById('timer-container');
+                        
+                        function updateTimer() {{
+                            var mins = Math.floor(remaining / 60);
+                            var secs = remaining % 60;
+                            display.textContent = mins + ':' + (secs < 10 ? '0' : '') + secs;
+                            fill.style.width = ((remaining / totalSeconds) * 100) + '%';
+                            
+                            if (remaining <= 30) {{
+                                display.style.color = '#dc3545';
+                                fill.style.background = '#dc3545';
+                                container.style.borderColor = '#dc3545';
+                                container.style.background = 'linear-gradient(135deg, #fff5f5 0%, #ffe0e0 100%)';
+                            }} else if (remaining <= 60) {{
+                                display.style.color = '#ffc107';
+                                fill.style.background = '#ffc107';
+                            }}
+                            
+                            if (remaining <= 0) {{
+                                display.textContent = "⏰ TIME'S UP";
+                                display.style.fontSize = '1.2rem';
+                                clearInterval(timerInterval);
+                            }}
+                            remaining--;
+                        }}
+                        
+                        updateTimer();
+                        var timerInterval = setInterval(updateTimer, 1000);
+                    </script>
+                    """, height=100)
+                
                 # Answer input
                 answer = st.text_area(
                     "Your Answer",
